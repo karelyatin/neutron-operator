@@ -1,0 +1,28 @@
+#
+# Check for:
+#
+# No NeutronAPI CR
+# No neutron/neutron-worker Deployments
+# No neutron-rpc Deployment ever (rpc_workers=0 for the whole test)
+#
+apiVersion: neutron.openstack.org/v1beta1
+kind: NeutronAPI
+metadata:
+  finalizers:
+  - openstack.org/neutronapi
+  name: neutron
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: neutron
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: neutron-rpc
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: neutron-worker

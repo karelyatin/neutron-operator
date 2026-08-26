@@ -19,7 +19,6 @@ kind: NeutronAPI
 metadata:
   name: neutron
 spec:
-  containerImage: quay.io/tripleowallabycentos9/openstack-neutron-server:current-podified
   databaseInstance: openstack
   secret: neutron-secret
 ```
@@ -206,7 +205,6 @@ spec:
   rabbitMqClusterName: rabbitmq
   memcachedInstance: memcached
   preserveJobs: false
-  containerImage: quay.io/podified-antelope-centos9/openstack-neutron-server:current-podified
   replicas: 1
   secret: neutron-secret
   extraMounts:

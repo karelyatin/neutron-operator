@@ -1,0 +1,37 @@
+apiVersion: neutron.openstack.org/v1beta1
+kind: NeutronAPI
+metadata:
+  finalizers:
+  - openstack.org/neutronapi
+  name: neutron
+spec:
+  replicas: 1
+  ml2MechanismDrivers:
+    - openvswitch
+status:
+  readyCount: 1
+  workerReadyCount: 1
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: neutron
+spec:
+  replicas: 1
+status:
+  availableReplicas: 1
+  readyReplicas: 1
+  replicas: 1
+  updatedReplicas: 1
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: neutron-worker
+spec:
+  replicas: 1
+status:
+  availableReplicas: 1
+  readyReplicas: 1
+  replicas: 1
+  updatedReplicas: 1

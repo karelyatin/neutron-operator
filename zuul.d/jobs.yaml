@@ -29,7 +29,12 @@
       cifmw_edpm_deploy_nova_compute_extra_config: |
         [DEFAULT]
         force_config_drive = false
-      cifmw_test_operator_tempest_container: openstack-tempest-all
+      # TODO: Image overrides can be dropped once default images changes to master for CI
+      cifmw_update_containers_custom_images:
+        neutronAPIImage: quay.io/openstack-s2i-containers/openstack-neutron-server:master-latest
+        edpmNeutronMetadataAgentImage: quay.io/openstack-s2i-containers/openstack-neutron-metadata-agent-ovn:master-latest
+      cifmw_test_operator_tempest_image: quay.io/openstack-s2i-containers/openstack-tempest
+      cifmw_test_operator_tempest_image_tag: master-latest
       cifmw_run_test_role: test_operator
       cifmw_test_operator_tempest_network_attachments:
         - ctlplane
@@ -39,6 +44,7 @@
             validation.run_validation true
             identity.v3_endpoint_type public
             identity.v2_admin_endpoint_type public
+            neutron_plugin_options.snat_rules_apply_to_nested_networks true
       cifmw_test_operator_tempest_include_list: |
         neutron_tempest_plugin.api
         neutron_tempest_plugin.scenario
@@ -51,3 +57,7 @@
         test_qos_dscp_create_and_update
         # Limit job runtime
         NetworkSecGroupTest
+        # Needs docker setup
+        NetworkMultipleGWTest
+        # TypeError: NeutronTempestPluginException.__init__() takes 1 positional argument but 2 were given
+        L3AgentSchedulerTestJSON

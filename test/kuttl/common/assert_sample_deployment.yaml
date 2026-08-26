@@ -64,38 +64,11 @@ spec:
               topologyKey: kubernetes.io/hostname
             weight: 100
       automountServiceAccountToken: false
+      # WSGI is the default strategy (no neutron.openstack.org/wsgi
+      # annotation set by this test): httpd/mod_wsgi loads the neutron API
+      # application in-process, so there is a single container rather than
+      # the separate eventlet neutron-api + httpd reverse-proxy pair.
       containers:
-      - command:
-        - /bin/bash
-        args:
-        - -c
-        - neutron-server --config-file /usr/share/neutron/neutron-dist.conf --config-file
-          /etc/neutron/neutron.conf --config-dir /etc/neutron/neutron.conf.d
-        imagePullPolicy: IfNotPresent
-        livenessProbe:
-          failureThreshold: 3
-          httpGet:
-            path: /
-            port: 9696
-            scheme: HTTP
-          initialDelaySeconds: 5
-          periodSeconds: 30
-          successThreshold: 1
-          timeoutSeconds: 30
-        name: neutron-api
-        resources: {}
-        securityContext:
-          allowPrivilegeEscalation: false
-          capabilities:
-            drop:
-            - ALL
-          runAsGroup: 42435
-          runAsNonRoot: true
-          runAsUser: 42435
-          seccompProfile:
-            type: RuntimeDefault
-        terminationMessagePath: /dev/termination-log
-        terminationMessagePolicy: FallbackToLogsOnError
       - command:
         - /bin/bash
         args:
@@ -147,6 +120,38 @@ spec:
       serviceAccount: neutron-neutron
       serviceAccountName: neutron-neutron
       terminationGracePeriodSeconds: 30
+status:
+  availableReplicas: 1
+  readyReplicas: 1
+  replicas: 1
+  updatedReplicas: 1
+---
+# WSGI is the default strategy: neutron-rpc-server and the background
+# workers (periodic + ovn-maintenance, since the sample uses ovn) run as
+# their own Deployments rather than inside the API pod.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: neutron-rpc
+spec:
+  replicas: 1
+status:
+  availableReplicas: 1
+  readyReplicas: 1
+  replicas: 1
+  updatedReplicas: 1
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: neutron-worker
+spec:
+  replicas: 1
+  template:
+    spec:
+      containers:
+      - name: neutron-periodic-workers
+      - name: neutron-ovn-maintenance-worker
 status:
   availableReplicas: 1
   readyReplicas: 1

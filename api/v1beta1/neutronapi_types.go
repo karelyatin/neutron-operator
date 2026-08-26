@@ -17,6 +17,9 @@ limitations under the License.
 package v1beta1
 
 import (
+	"strconv"
+	"strings"
+
 	rabbitmqv1 "github.com/openstack-k8s-operators/infra-operator/apis/rabbitmq/v1beta1"
 	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/condition"
@@ -38,8 +41,24 @@ const (
 
 	// Container image fall-back defaults
 
-	// NeutronAPIContainerImage is the fall-back container image for NeutronAPI
-	NeutronAPIContainerImage = "quay.io/podified-antelope-centos9/openstack-neutron-server:current-podified"
+	// NeutronAPIContainerImage is the fall-back container image for NeutronAPI.
+	// This is a master-branch image (Eventlet removed, WSGI/neutron-rpc-server
+	// support present) -- it must stay in lockstep with the IsWSGI() default
+	// below: an Eventlet default would not run on this image, and a WSGI
+	// default would not run on an Antelope-era image.
+	NeutronAPIContainerImage = "quay.io/openstack-s2i-containers/openstack-neutron-server:master-latest"
+
+	// NeutronWSGILabel is the annotation used to select between the WSGI
+	// (httpd/mod_wsgi + separate neutron-rpc-server/worker Deployments) and
+	// the legacy Eventlet (neutron-server + httpd reverse-proxy) deployment
+	// strategies. It is set by openstack-operator on every reconcile, based
+	// on OpenStackVersion.Status.ServiceDefaults.NeutronWsgi, so that
+	// upgrading openstack-operator alone never changes the strategy of an
+	// existing deployment: that value stays pinned to whatever was computed
+	// for the deployment's targeted version until the control plane is
+	// explicitly moved to one where it is true. See IsWSGI() for the
+	// (unrelated) default used when the annotation is absent entirely.
+	NeutronWSGILabel = "neutron.openstack.org/wsgi"
 )
 
 // NeutronAPISpec defines the desired state of NeutronAPI
@@ -256,6 +275,15 @@ type NeutronAPIStatus struct {
 	// NotificationsTransportURLSecret - Secret containing
 	// external notifications transportURL
 	NotificationsTransportURLSecret *string `json:"notificationsTransportURLSecret,omitempty"`
+
+	// RPCReadyCount of neutron-rpc-server instances. Only populated when the
+	// WSGI deployment strategy is enabled and the RPC worker is not disabled
+	// via rpc_workers=0 in customServiceConfig.
+	RPCReadyCount int32 `json:"rpcReadyCount,omitempty"`
+
+	// WorkerReadyCount of neutron background worker (periodic/OVN maintenance)
+	// instances. Only populated when the WSGI deployment strategy is enabled.
+	WorkerReadyCount int32 `json:"workerReadyCount,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -332,6 +360,26 @@ func (instance NeutronAPI) RbacResourceName() string {
 	return "neutron-" + instance.Name
 }
 
+// IsWSGI - returns true if this NeutronAPI should be deployed using the
+// WSGI strategy (httpd/mod_wsgi + separate neutron-rpc/neutron-worker
+// Deployments), based on the NeutronWSGILabel annotation. Absent the
+// annotation, it defaults to true, matching NeutronAPIContainerImage
+// (a master-branch image that no longer supports Eventlet)
+//
+// This default only governs standalone use of neutron-operator (no
+// annotation ever set). Real backward compatibility for openstack-operator
+// managed deployments is NOT provided here: it comes entirely from
+// openstack-operator explicitly setting this annotation on every reconcile,
+// based on OpenStackVersion.Status.ServiceDefaults.NeutronWsgi, which stays
+// pinned to whatever value was computed for a deployment's targeted
+// version until the control plane is moved to a version where it is true.
+func (instance NeutronAPI) IsWSGI() bool {
+	if v, ok := instance.GetAnnotations()[NeutronWSGILabel]; ok {
+		return v == "true"
+	}
+	return true
+}
+
 func (instance NeutronAPI) IsOVNEnabled() bool {
 	for _, driver := range instance.Spec.Ml2MechanismDrivers {
 		// TODO: use const
@@ -340,6 +388,42 @@ func (instance NeutronAPI) IsOVNEnabled() bool {
 		}
 	}
 	return false
+}
+
+// GetRPCWorkers parses instance.Spec.CustomServiceConfig for an explicit
+// rpc_workers setting under the [DEFAULT] section (the only section
+// rpc_workers is valid in), the same way GetEnabledBackends() does for
+// Glance's enabled_backends. It returns the parsed value and whether
+// rpc_workers was found at all. Used to decide whether the neutron-rpc
+// Deployment should be disabled (rpc_workers=0) when running under the WSGI
+// strategy.
+func GetRPCWorkers(customServiceConfig string) (int, bool) {
+	// Content before any section header belongs to the implicit [DEFAULT]
+	// section, matching Python's configparser (and oslo.config) semantics.
+	section := "DEFAULT"
+	for _, line := range strings.Split(customServiceConfig, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			// Skip blank lines and comments
+			continue
+		}
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			section = strings.TrimSpace(trimmed[1 : len(trimmed)-1])
+			continue
+		}
+		if section != "DEFAULT" {
+			continue
+		}
+		tokenLine := strings.SplitN(trimmed, "=", 2)
+		token := strings.ReplaceAll(tokenLine[0], " ", "")
+		if token == "rpc_workers" && len(tokenLine) == 2 {
+			val, err := strconv.Atoi(strings.TrimSpace(tokenLine[1]))
+			if err == nil {
+				return val, true
+			}
+		}
+	}
+	return -1, false
 }
 
 // SetupDefaults - initializes any CRD field defaults based on environment variables (the defaulting mechanism itself is implemented via webhooks)

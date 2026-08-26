@@ -493,10 +493,18 @@ func getNeutronAPIControllerSuite(ml2MechanismDrivers []string) func() {
 				configData := th.GetSecret(secret)
 				Expect(configData).ShouldNot(BeNil())
 				conf := string(configData.Data["01-neutron.conf"])
+				// WSGI is the default strategy (no neutron.openstack.org/wsgi
+				// annotation set in this test): api_workers is forced to 0
+				// since httpd/mod_wsgi manages API worker processes, and
+				// rpc_workers is left unset so neutron-rpc-server uses its
+				// own default worker count.
 				Expect(conf).Should(
-					ContainSubstring("api_workers = 2"))
-				Expect(conf).Should(
-					ContainSubstring("rpc_workers = 1"))
+					ContainSubstring("api_workers = 0"))
+				// Only check for an actual "rpc_workers =" assignment line;
+				// the WSGI branch of the template also has an explanatory
+				// comment mentioning "rpc_workers" in prose.
+				Expect(conf).ShouldNot(
+					ContainSubstring("rpc_workers ="))
 				Expect(conf).Should(
 					ContainSubstring("mysql_wsrep_sync_wait = 1"))
 
@@ -1115,18 +1123,18 @@ func getNeutronAPIControllerSuite(ml2MechanismDrivers []string) func() {
 				)
 				Expect(int(*deployment.Spec.Replicas)).To(Equal(1))
 				Expect(deployment.Spec.Template.Spec.Volumes).To(HaveLen(3))
-				Expect(deployment.Spec.Template.Spec.Containers).To(HaveLen(2))
+				// WSGI is the default strategy (no neutron.openstack.org/wsgi
+				// annotation set in this test): httpd/mod_wsgi loads the API
+				// in-process, so there is a single container mounting both
+				// the neutron config and the httpd config volumes.
+				Expect(deployment.Spec.Template.Spec.Containers).To(HaveLen(1))
 
-				nSvcContainer := deployment.Spec.Template.Spec.Containers[0]
-				Expect(nSvcContainer.LivenessProbe.HTTPGet.Port.IntVal).To(Equal(int32(9696)))
-				Expect(nSvcContainer.VolumeMounts).To(HaveLen(3))
-				Expect(nSvcContainer.Image).To(Equal(util.GetEnvVar("RELATED_IMAGE_NEUTRON_API_IMAGE_URL_DEFAULT", neutronv1.NeutronAPIContainerImage)))
-
-				nHttpdProxyContainer := deployment.Spec.Template.Spec.Containers[1]
-				Expect(nHttpdProxyContainer.LivenessProbe.HTTPGet.Port.IntVal).To(Equal(int32(9696)))
-				Expect(nHttpdProxyContainer.ReadinessProbe.HTTPGet.Port.IntVal).To(Equal(int32(9696)))
-				Expect(nHttpdProxyContainer.VolumeMounts).To(HaveLen(4))
-				Expect(nHttpdProxyContainer.Image).To(Equal(util.GetEnvVar("RELATED_IMAGE_NEUTRON_API_IMAGE_URL_DEFAULT", neutronv1.NeutronAPIContainerImage)))
+				httpdContainer := deployment.Spec.Template.Spec.Containers[0]
+				Expect(httpdContainer.Name).To(Equal("neutron-httpd"))
+				Expect(httpdContainer.LivenessProbe.HTTPGet.Port.IntVal).To(Equal(int32(9696)))
+				Expect(httpdContainer.ReadinessProbe.HTTPGet.Port.IntVal).To(Equal(int32(9696)))
+				Expect(httpdContainer.VolumeMounts).To(HaveLen(7))
+				Expect(httpdContainer.Image).To(Equal(util.GetEnvVar("RELATED_IMAGE_NEUTRON_API_IMAGE_URL_DEFAULT", neutronv1.NeutronAPIContainerImage)))
 			})
 		})
 
@@ -1226,6 +1234,13 @@ func getNeutronAPIControllerSuite(ml2MechanismDrivers []string) func() {
 					condition.DeploymentReadyCondition,
 					corev1.ConditionTrue,
 				)
+
+				// WSGI is the default strategy (no neutron.openstack.org/wsgi
+				// annotation set in this test): neutron-rpc and
+				// neutron-worker also need to reach Ready for the aggregate
+				// Ready condition to go True.
+				th.SimulateDeploymentReplicaReady(types.NamespacedName{Namespace: namespace, Name: "neutron-rpc"})
+				th.SimulateDeploymentReplicaReady(types.NamespacedName{Namespace: namespace, Name: "neutron-worker"})
 
 				th.ExpectCondition(
 					neutronAPIName,
@@ -1460,25 +1475,26 @@ func getNeutronAPIControllerSuite(ml2MechanismDrivers []string) func() {
 					th.AssertVolumeExists(ovnDbCertSecretName.Name, deployment.Spec.Template.Spec.Volumes)
 				}
 
-				// svc container ca cert
-				nSvcContainer := deployment.Spec.Template.Spec.Containers[0]
-				th.AssertVolumeMountPathExists(caBundleSecretName.Name, "", "tls-ca-bundle.pem", nSvcContainer.VolumeMounts)
+				// WSGI is the default strategy (no neutron.openstack.org/wsgi
+				// annotation set in this test): httpd/mod_wsgi loads the API
+				// in-process, so all cert mounts (API-side OVN certs,
+				// httpd-side endpoint certs, and the shared CA bundle) land
+				// on the single httpd container.
+				httpdContainer := deployment.Spec.Template.Spec.Containers[0]
+				th.AssertVolumeMountPathExists(caBundleSecretName.Name, "", "tls-ca-bundle.pem", httpdContainer.VolumeMounts)
 				if isOVNEnabled {
-					th.AssertVolumeMountPathExists(ovnDbCertSecretName.Name, "", "tls.key", nSvcContainer.VolumeMounts)
-					th.AssertVolumeMountPathExists(ovnDbCertSecretName.Name, "", "tls.crt", nSvcContainer.VolumeMounts)
-					th.AssertVolumeMountPathExists(ovnDbCertSecretName.Name, "", "ca.crt", nSvcContainer.VolumeMounts)
+					th.AssertVolumeMountPathExists(ovnDbCertSecretName.Name, "", "tls.key", httpdContainer.VolumeMounts)
+					th.AssertVolumeMountPathExists(ovnDbCertSecretName.Name, "", "tls.crt", httpdContainer.VolumeMounts)
+					th.AssertVolumeMountPathExists(ovnDbCertSecretName.Name, "", "ca.crt", httpdContainer.VolumeMounts)
 				}
 
-				// httpd container certs
-				nHttpdProxyContainer := deployment.Spec.Template.Spec.Containers[1]
-				th.AssertVolumeMountPathExists(publicCertSecretName.Name, "", "tls.key", nHttpdProxyContainer.VolumeMounts)
-				th.AssertVolumeMountPathExists(publicCertSecretName.Name, "", "tls.crt", nHttpdProxyContainer.VolumeMounts)
-				th.AssertVolumeMountPathExists(internalCertSecretName.Name, "", "tls.key", nHttpdProxyContainer.VolumeMounts)
-				th.AssertVolumeMountPathExists(internalCertSecretName.Name, "", "tls.crt", nHttpdProxyContainer.VolumeMounts)
-				th.AssertVolumeMountPathExists(caBundleSecretName.Name, "", "tls-ca-bundle.pem", nHttpdProxyContainer.VolumeMounts)
+				th.AssertVolumeMountPathExists(publicCertSecretName.Name, "", "tls.key", httpdContainer.VolumeMounts)
+				th.AssertVolumeMountPathExists(publicCertSecretName.Name, "", "tls.crt", httpdContainer.VolumeMounts)
+				th.AssertVolumeMountPathExists(internalCertSecretName.Name, "", "tls.key", httpdContainer.VolumeMounts)
+				th.AssertVolumeMountPathExists(internalCertSecretName.Name, "", "tls.crt", httpdContainer.VolumeMounts)
 
-				Expect(nHttpdProxyContainer.ReadinessProbe.HTTPGet.Scheme).To(Equal(corev1.URISchemeHTTPS))
-				Expect(nHttpdProxyContainer.LivenessProbe.HTTPGet.Scheme).To(Equal(corev1.URISchemeHTTPS))
+				Expect(httpdContainer.ReadinessProbe.HTTPGet.Scheme).To(Equal(corev1.URISchemeHTTPS))
+				Expect(httpdContainer.LivenessProbe.HTTPGet.Scheme).To(Equal(corev1.URISchemeHTTPS))
 
 				secret := types.NamespacedName{
 					Namespace: neutronAPIName.Namespace,
@@ -1488,10 +1504,18 @@ func getNeutronAPIControllerSuite(ml2MechanismDrivers []string) func() {
 				configData := th.GetSecret(secret)
 				Expect(configData).ShouldNot(BeNil())
 				conf := string(configData.Data["01-neutron.conf"])
+				// WSGI is the default strategy (no neutron.openstack.org/wsgi
+				// annotation set in this test): api_workers is forced to 0
+				// since httpd/mod_wsgi manages API worker processes, and
+				// rpc_workers is left unset so neutron-rpc-server uses its
+				// own default worker count.
 				Expect(conf).Should(
-					ContainSubstring("api_workers = 2"))
-				Expect(conf).Should(
-					ContainSubstring("rpc_workers = 1"))
+					ContainSubstring("api_workers = 0"))
+				// Only check for an actual "rpc_workers =" assignment line;
+				// the WSGI branch of the template also has an explanatory
+				// comment mentioning "rpc_workers" in prose.
+				Expect(conf).ShouldNot(
+					ContainSubstring("rpc_workers ="))
 				Expect(conf).Should(
 					ContainSubstring("mysql_wsrep_sync_wait = 1"))
 
@@ -1570,6 +1594,125 @@ func getNeutronAPIControllerSuite(ml2MechanismDrivers []string) func() {
 						).Spec.Template.Spec.Containers[0].Env, "CONFIG_HASH", "")
 					g.Expect(newHash).NotTo(BeEmpty())
 					g.Expect(newHash).NotTo(Equal(originalHash))
+				}, timeout, interval).Should(Succeed())
+			})
+		})
+
+		When("A NeutronAPI is created with TLS and the WSGI strategy enabled", func() {
+			BeforeEach(func() {
+				spec["tls"] = map[string]any{
+					"api": map[string]any{
+						"internal": map[string]any{
+							"secretName": InternalCertSecretName,
+						},
+						"public": map[string]any{
+							"secretName": PublicCertSecretName,
+						},
+					},
+					"caBundleSecretName": CABundleSecretName,
+					"ovn": map[string]any{
+						"secretName": InternalCertSecretName,
+					},
+				}
+				DeferCleanup(th.DeleteInstance, CreateNeutronAPIWithAnnotations(
+					neutronAPIName.Namespace, neutronAPIName.Name, spec,
+					map[string]string{"neutron.openstack.org/wsgi": "true"}))
+
+				DeferCleanup(k8sClient.Delete, ctx, th.CreateCABundleSecret(caBundleSecretName))
+				DeferCleanup(k8sClient.Delete, ctx, th.CreateCertSecret(internalCertSecretName))
+				DeferCleanup(k8sClient.Delete, ctx, th.CreateCertSecret(publicCertSecretName))
+				DeferCleanup(k8sClient.Delete, ctx, CreateNeutronAPISecret(namespace, SecretName))
+				DeferCleanup(
+					mariadb.DeleteDBService,
+					mariadb.CreateDBService(
+						namespace,
+						GetNeutronAPI(neutronAPIName).Spec.DatabaseInstance,
+						corev1.ServiceSpec{
+							Ports: []corev1.ServicePort{{Port: 3306}},
+						},
+					),
+				)
+				SimulateTransportURLReady(apiTransportURLName)
+				DeferCleanup(infra.DeleteMemcached, infra.CreateMemcached(namespace, "memcached", memcachedSpec))
+				infra.SimulateTLSMemcachedReady(memcachedName)
+				DeferCleanup(DeleteOVNDBClusters, CreateOVNDBClusters(namespace))
+				DeferCleanup(keystone.DeleteKeystoneAPI, keystone.CreateKeystoneAPI(namespace))
+				mariadb.SimulateMariaDBAccountCompleted(types.NamespacedName{Namespace: namespace, Name: GetNeutronAPI(neutronAPIName).Spec.DatabaseAccount})
+				mariadb.SimulateMariaDBTLSDatabaseCompleted(types.NamespacedName{Namespace: namespace, Name: neutronapi.Database})
+				th.SimulateJobSuccess(neutronDBSyncJobName)
+				keystone.SimulateKeystoneServiceReady(types.NamespacedName{Namespace: namespace, Name: "neutron"})
+				keystone.SimulateKeystoneEndpointReady(types.NamespacedName{Namespace: namespace, Name: "neutron"})
+			})
+
+			// Regression test: with both TLS (CA bundle) and the WSGI
+			// strategy enabled, the httpd container used to end up with the
+			// CA bundle VolumeMount twice (once from the mounts built for
+			// the eventlet neutron-api container, once from httpd's own),
+			// which the Kubernetes API rejects with "must be unique" and
+			// the Deployment never gets created.
+			It("creates a single-container Deployment without duplicate VolumeMounts", func() {
+				th.ExpectCondition(
+					neutronAPIName,
+					ConditionGetterFunc(NeutronAPIConditionGetter),
+					condition.TLSInputReadyCondition,
+					corev1.ConditionTrue,
+				)
+
+				deployment := th.GetDeployment(
+					types.NamespacedName{
+						Namespace: neutronAPIName.Namespace,
+						Name:      "neutron",
+					},
+				)
+
+				Expect(deployment.Spec.Template.Spec.Containers).To(HaveLen(1))
+				httpdContainer := deployment.Spec.Template.Spec.Containers[0]
+				Expect(httpdContainer.Name).To(Equal("neutron-httpd"))
+
+				seenPaths := map[string]int{}
+				for _, m := range httpdContainer.VolumeMounts {
+					seenPaths[m.MountPath]++
+				}
+				for path, count := range seenPaths {
+					Expect(count).To(Equal(1), "MountPath %s must be unique, got %d", path, count)
+				}
+
+				th.AssertVolumeMountPathExists(caBundleSecretName.Name, "", "tls-ca-bundle.pem", httpdContainer.VolumeMounts)
+				if isOVNEnabled {
+					th.AssertVolumeMountPathExists(ovnDbCertSecretName.Name, "", "tls.key", httpdContainer.VolumeMounts)
+				}
+				th.AssertVolumeMountPathExists(publicCertSecretName.Name, "", "tls.crt", httpdContainer.VolumeMounts)
+				th.AssertVolumeMountPathExists(internalCertSecretName.Name, "", "tls.crt", httpdContainer.VolumeMounts)
+			})
+
+			// Regression test: envtest never runs a real Deployment
+			// controller, so right after neutron-rpc/neutron-worker are
+			// created their Status.ObservedGeneration never catches up to
+			// Generation. NeutronRPCReadyCondition/NeutronWorkerReadyCondition
+			// must still show up as non-true in this state -- not be absent
+			// -- otherwise AllSubConditionIsTrue() would ignore them and the
+			// aggregate Ready condition could go True before either child
+			// Deployment has actually rolled out.
+			It("keeps the RPC and worker conditions present and non-true while their Deployments are not yet observed", func() {
+				th.GetDeployment(
+					types.NamespacedName{Namespace: neutronAPIName.Namespace, Name: "neutron-rpc"},
+				)
+				th.GetDeployment(
+					types.NamespacedName{Namespace: neutronAPIName.Namespace, Name: "neutron-worker"},
+				)
+
+				Eventually(func(g Gomega) {
+					conditions := NeutronAPIConditionGetter(neutronAPIName)
+
+					rpcCond := conditions.Get(neutronv1.NeutronRPCReadyCondition)
+					g.Expect(rpcCond).NotTo(BeNil())
+					g.Expect(rpcCond.Status).NotTo(Equal(corev1.ConditionTrue))
+
+					workerCond := conditions.Get(neutronv1.NeutronWorkerReadyCondition)
+					g.Expect(workerCond).NotTo(BeNil())
+					g.Expect(workerCond.Status).NotTo(Equal(corev1.ConditionTrue))
+
+					g.Expect(conditions.IsTrue(condition.ReadyCondition)).To(BeFalse())
 				}, timeout, interval).Should(Succeed())
 			})
 		})
@@ -1826,12 +1969,16 @@ func getNeutronAPIControllerSuite(ml2MechanismDrivers []string) func() {
 				dp := th.GetDeployment(neutronDeploymentName)
 				// Check the resulting deployment fields
 				Expect(dp.Spec.Template.Spec.Volumes).To(HaveLen(4))
-				Expect(dp.Spec.Template.Spec.Containers).To(HaveLen(2))
+				// WSGI is the default strategy (no neutron.openstack.org/wsgi
+				// annotation set in this test): a single httpd container
+				// mounts both its own 4 base mounts and the api container's
+				// 3 base mounts + 1 extraMount.
+				Expect(dp.Spec.Template.Spec.Containers).To(HaveLen(1))
 				// Get the neutron container
 				container := dp.Spec.Template.Spec.Containers[0]
 				// Fail if neutron doesn't have the right number of VolumeMounts
 				// entries
-				Expect(container.VolumeMounts).To(HaveLen(4))
+				Expect(container.VolumeMounts).To(HaveLen(8))
 				// Inspect VolumeMounts and make sure we have the Foo MountPath
 				// provided through extraMounts
 				th.AssertVolumeMountPathExists(neutronExtraMountsSecretName,
@@ -2292,6 +2439,18 @@ func getNeutronAPIControllerSuite(ml2MechanismDrivers []string) func() {
 					Namespace: namespace,
 					Name:      "neutron",
 				})
+				// WSGI is the default strategy (no neutron.openstack.org/wsgi
+				// annotation set in this test): neutron-rpc and
+				// neutron-worker also need to reach Ready for the aggregate
+				// Ready condition to go True.
+				th.SimulateDeploymentReplicaReady(types.NamespacedName{
+					Namespace: namespace,
+					Name:      "neutron-rpc",
+				})
+				th.SimulateDeploymentReplicaReady(types.NamespacedName{
+					Namespace: namespace,
+					Name:      "neutron-worker",
+				})
 				keystone.SimulateKeystoneServiceReady(types.NamespacedName{
 					Namespace: namespace,
 					Name:      "neutron",
@@ -2338,6 +2497,20 @@ func getNeutronAPIControllerSuite(ml2MechanismDrivers []string) func() {
 					th.SimulateDeploymentReplicaReady(types.NamespacedName{
 						Namespace: namespace,
 						Name:      "neutron",
+					})
+					// WSGI is the default strategy (no
+					// neutron.openstack.org/wsgi annotation set in this
+					// test): the AC secret rotation bumps the Deployments'
+					// config hash/generation again, so neutron-rpc and
+					// neutron-worker need to be re-simulated as ready for
+					// AllSubConditionIsTrue() to allow the finalizer move.
+					th.SimulateDeploymentReplicaReady(types.NamespacedName{
+						Namespace: namespace,
+						Name:      "neutron-rpc",
+					})
+					th.SimulateDeploymentReplicaReady(types.NamespacedName{
+						Namespace: namespace,
+						Name:      "neutron-worker",
 					})
 					secret := th.GetSecret(types.NamespacedName{
 						Namespace: namespace,
@@ -2530,6 +2703,12 @@ var _ = Describe("NeutronAPI Webhook", func() {
 				deplName,
 				map[string][]string{namespace + "/internalapi": {}},
 			)
+			// WSGI is the default strategy (no neutron.openstack.org/wsgi
+			// annotation set in this test): the neutron-rpc and
+			// neutron-worker Deployments also need to reach Ready for the
+			// aggregate Ready condition to go True.
+			th.SimulateDeploymentReplicaReady(types.NamespacedName{Namespace: namespace, Name: "neutron-rpc"})
+			th.SimulateDeploymentReplicaReady(types.NamespacedName{Namespace: namespace, Name: "neutron-worker"})
 
 			th.ExpectCondition(
 				neutronAPIName,
